@@ -17,7 +17,6 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 const cors = require('cors');
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
 const dotenv = require('dotenv');
 const Razorpay = require('razorpay');
 const { WebSocketServer } = require("ws");
@@ -26,7 +25,7 @@ const multer = require("multer");
 const helmet = require("helmet");
 const cloudinary = require("cloudinary").v2;
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
-
+const sendEmail = require("./utils/sendEmail");
 
 
 
@@ -281,112 +280,166 @@ app.post('/api/save-form-data', async (req, res) => {
     }
 });
 
-app.post('/send-otp', async (req, res) => {
 
+
+app.post("/send-otp", async (req, res) => {
     const { email } = req.body;
-    const otp = crypto.randomInt(100000, 999999).toString();  // Generate a 6-digit OTP
-    otpStore[email] = otp;  // Store OTP temporarily in memory (use a more persistent storage in production)
 
-    //  Configure Nodemailer
-    let transporter = nodemailer.createTransport({
-        host: 'smtp.zoho.in',
-        port: 465,
-        secure: true,
-        auth: {
-            user: process.env.EMAIL_USER,
-            pass: process.env.EMAIL_PASS,
-        },
-    });
+    // 1️⃣ Generate 6-digit OTP
+    const otp = crypto.randomInt(100000, 999999).toString();
 
-
-    const mailOptions = {
-        from: process.env.EMAIL_USER,
-        to: email,
-        subject: 'Your OTP Code',
-        html: `
-            <div style="font-family: Arial, sans-serif; padding: 20px; color: #333;">
-                <h2 style="color: #007bff;">Hello!</h2>
-                <p>Thank you for using our service.</p>
-                <p>Your One-Time Password (OTP) is:</p>
-                <h1 style="background-color: #f2f2f2; padding: 10px; display: inline-block; border-radius: 5px;">${otp}</h1>
-                <p>This OTP is valid for the next 10 minutes.</p>
-                <p style="color: #888;">If you did not request this, please ignore this email.</p>
-                <br/>
-                <p>Best regards,<br/><strong>EzyZip Team</strong></p>
-            </div>
-        `
+    // 2️⃣ Store OTP with expiry (10 minutes)
+    otpStore[email] = {
+        otp: otp,
+        expiresAt: Date.now() + 10 * 60 * 1000
     };
 
     try {
-        await transporter.sendMail(mailOptions); //  wait for sending
-        otpStore[email] = otp;  //  store only after successful send
-        console.log("OTP Sent:", otp);
-        res.status(200).send({ success: true, message: 'OTP sent' });
-    } catch (error) {
-        console.error("Error sending OTP:", error);
-        res.status(500).send({ success: false, message: 'Failed to send OTP' });
-    }
+        // 3️⃣ Send OTP email
+        await sendEmail({
+            to: email,
+            subject: "Your OTP Code",
+            html: `
+        <h2>Hello!</h2>
+        <p>Your OTP is:</p>
+        <h1>${otp}</h1>
+        <p>This OTP is valid for <strong>10 minutes</strong>.</p>
+      `,
+        });
 
+        res.status(200).json({
+            success: true,
+            message: "OTP sent successfully"
+        });
+
+    } catch (error) {
+        console.error("OTP send error:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to send OTP"
+        });
+    }
 });
 
-app.post('/verify-otp', (req, res) => {
+
+app.post("/verify-otp", (req, res) => {
     const { email, otp } = req.body;
 
-    console.log('Received OTP:', otp); // Debugging
-    console.log('Stored OTP:', otpStore[email]); // Debugging
+    const record = otpStore[email];
 
-    if (otpStore[email] === otp) {
-        res.status(200).send({ success: true });
-    } else {
-        res.status(400).send({ success: false, message: 'Invalid OTP' });
+    // 1️⃣ Check if OTP exists
+    if (!record) {
+        return res.status(400).json({
+            success: false,
+            message: "OTP expired or not found"
+        });
     }
+
+    // 2️⃣ Check expiry
+    if (record.expiresAt < Date.now()) {
+        delete otpStore[email]; // cleanup
+        return res.status(400).json({
+            success: false,
+            message: "OTP expired"
+        });
+    }
+
+    // 3️⃣ Verify OTP
+    if (record.otp !== otp) {
+        return res.status(400).json({
+            success: false,
+            message: "Invalid OTP"
+        });
+    }
+
+    // 4️⃣ Success → delete OTP
+    //   delete otpStore[email];
+
+    res.status(200).json({
+        success: true,
+        message: "OTP verified successfully"
+    });
 });
 
 
 app.post("/register", async (req, res) => {
-    const { username, email, password, otp } = req.body;
-
-    console.log("Received OTP:", otp);  //  Log received OTP
-    console.log("Stored OTP:", otpStore[email]); // ✅ Log stored OTP
-
-
-    // ✅ Verify OTP before registering
-    if (!otpStore[email] || otpStore[email] !== otp) {
-        return res.status(400).json("Invalid or expired OTP");
-    }
-
-    // Check if the user already exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-        return res.status(400).json("Email already exists");
-    }
-
-    // Hash the password before storing it
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Create and save the user
-    const newUser = new User({
-        username,
-        email,
-        password: hashedPassword,
-    });
-
     try {
+        const { username, email, password, otp } = req.body;
+
+        // 1️⃣ Get OTP record
+        const record = otpStore[email];
+
+        console.log("Received OTP:", otp);
+        console.log("Stored OTP Record:", record);
+
+        // 2️⃣ Validate OTP
+        if (!record) {
+            return res.status(400).json({
+                success: false,
+                message: "OTP expired or not found"
+            });
+        }
+
+        if (record.expiresAt < Date.now()) {
+            delete otpStore[email]; // cleanup expired OTP
+            return res.status(400).json({
+                success: false,
+                message: "OTP expired"
+            });
+        }
+
+        if (record.otp !== otp) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid OTP"
+            });
+        }
+
+        // 3️⃣ Check if user already exists
+        const existingUser = await User.findOne({ email });
+        if (existingUser) {
+            return res.status(400).json({
+                success: false,
+                message: "Email already exists"
+            });
+        }
+
+        // 4️⃣ Hash password
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        // 5️⃣ Create user
+        const newUser = new User({
+            username,
+            email,
+            password: hashedPassword,
+        });
+
         await newUser.save();
-        delete otpStore[email]; //  Remove OTP after successful registration
-        res.status(201).json("Registration successful");
+
+        // 6️⃣ Cleanup OTP after successful registration
+        delete otpStore[email];
+
+        // 7️⃣ Success response
+        res.status(201).json({
+            success: true,
+            message: "Registration successful"
+        });
+
     } catch (error) {
-        res.status(500).json("Error registering user");
+        console.error("Register error:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error registering user"
+        });
     }
 });
 
+
 //  API to send form and payment details via email
 app.post("/send-email", async (req, res) => {
-    const { login_email } = req.body; // Get email from request
-
+    const { login_email } = req.body;
 
     try {
-        // ✅ Fetch user details from DB
         const userData = await FormData.findOne({ login_email });
         const paymentData = await PaymentData.findOne({ login_email });
 
@@ -394,89 +447,28 @@ app.post("/send-email", async (req, res) => {
             return res.status(404).json({ error: "User or payment data not found" });
         }
 
-        //  Configure Nodemailer
-        let transporter = nodemailer.createTransport({
-            host: 'smtp.zoho.in',
-            port: 465,
-            secure: true,
-            auth: {
-                user: process.env.EMAIL_USER,
-                pass: process.env.EMAIL_PASS,
-            },
-        });
-
-        console.log("User data:", userData); // Log user data
-        console.log("User img:", userData.photo); // Log user data
-
-
-
-        //  Email content
-        const mailOptions = {
-            from: process.env.EMAIL_USER2,
-            to: "aviationcetofficial@gmail.com", // Your email to receive notifications
+        await sendEmail({
+            to: "aviationcetofficial@gmail.com",
             subject: "New Registration on Your Website",
             html: `
-                <h2> New Registration Details</h2>
-                <h3> Personal Details:</h3>
-                <p><strong>Name:</strong> ${userData.fname} ${userData.lname}</p>
-                <p><strong>Email:</strong> ${userData.email}</p>
-                <p><strong>Phone:</strong> ${userData.number}</p>
-                <p><strong>Gender:</strong> ${userData.gender}</p>
-                <p><strong>Date of Birth:</strong> ${userData.dob}</p>
-                <p><strong>Father's Name:</strong> ${userData.fatherName}</p>
-                <p><strong>Mother's Name:</strong> ${userData.motherName}</p>
-    
-                <h3> Address:</h3>
-                <p><strong>Address:</strong> ${userData.address}</p>
-                <p><strong>City:</strong> ${userData.city}, <strong>State:</strong> ${userData.state}</p>
-                <p><strong>Country:</strong> ${userData.country}, <strong>Pin Code:</strong> ${userData.pin}</p>
-    
-                <h3> Education Details:</h3>
-                <p><strong>Class 10th School:</strong> ${userData.classXSchoolName} (${userData.classXBoard})</p>
-                <p><strong>Class 10th Year:</strong> ${userData.classXPassingYear}, <strong>Percentage:</strong> ${userData.classXPercentage}%</p>
-                <p><strong>Class 12th School:</strong> ${userData.classXIISchoolName} (${userData.classXIIBoard})</p>
-                <p><strong>Class 12th Year:</strong> ${userData.classXIIPassingYear}</p>
-                <p><strong>Polytechnic College:</strong> ${userData.polytechniccollegeName} (${userData.polytechnicPassingYear})</p>
-                <p><strong>University Board:</strong> ${userData.universityBoard}</p>
-                <p><strong>Qualification:</strong> ${userData.qualification}</p>
-    
-                <h3> Preferences:</h3>
-                <p><strong>Priority 1:</strong> ${userData.priority1}</p>
-                <p><strong>Priority 2:</strong> ${userData.priority2}</p>
-                <p><strong>Priority 3:</strong> ${userData.priority3}</p>
-    
-                <h3> Payment Details:</h3>
-                <p><strong>Amount Paid:</strong> ${paymentData?.amount || "N/A"}</p>
-                <p><strong>Order ID:</strong> ${paymentData?.orderId || "N/A"}</p>
-                <p><strong>Payment ID:</strong> ${paymentData?.paymentId || "N/A"}</p>
-                <p><strong>Payment Status:</strong> ${paymentData?.status || "N/A"}</p>
-              
+        <h2>New Registration Details</h2>
+        <p><strong>Name:</strong> ${userData.fname} ${userData.lname}</p>
+        <p><strong>Email:</strong> ${userData.email}</p>
+        <p><strong>Phone:</strong> ${userData.number}</p>
+        <p><strong>Amount Paid:</strong> ${paymentData.amount}</p>
+        <p><strong>Order ID:</strong> ${paymentData.orderId}</p>
+        <p><strong>Status:</strong> ${userData.status}</p>
+      `,
+        });
 
-                <hr>
-                <p> <strong>Status:</strong> ${userData.status || "Pending"}</p>
-                <p> We will contact you when your exam is scheduled.</p>
-            `,
-            attachments: [
-                {
-                    filename: "user-photo.jpg",
-                    path: userData.photo, // ✅ Cloudinary URL
-                },
-            ],
-        };
-
-
-        // ✅ Send email
-
-        let info = await transporter.sendMail(mailOptions);
-        console.log("Email sent:", info.messageId);
         res.status(200).json({ message: "Email sent successfully" });
 
-
     } catch (error) {
-        console.error("Error sending email:", error);
+        console.error("Brevo email error:", error);
         res.status(500).json({ error: "Failed to send email" });
     }
 });
+
 
 
 // Fetch form data from MongoDB
@@ -537,50 +529,85 @@ app.post("/login", async (req, res) => {
         res.status(500).json({ message: "Error logging in" });
     }
 });
+
 app.post("/forgot-password", async (req, res) => {
-    console.log("Request Body:", req.body);
     try {
         const { email } = req.body;
+
+        // 1️⃣ Check if user exists
         const user = await User.findOne({ email });
 
+        // IMPORTANT: Do NOT reveal if email exists (security best practice)
         if (!user) {
-            return res.status(200).json({ message: "If the email exists, a reset link has been sent." });
+            return res.status(200).json({
+                message: "If the email exists, a reset link has been sent."
+            });
         }
 
-        const resetToken = crypto.randomBytes(32).toString("hex"); // generate a unique token
-        const hashedToken = crypto.createHash("sha256").update(resetToken).digest("hex"); // hash the token before storing
+        // 2️⃣ Generate reset token (RAW token for URL)
+        const resetToken = crypto.randomBytes(32).toString("hex");
 
+        // 3️⃣ Hash token before saving (SECURITY)
+        const hashedToken = crypto
+            .createHash("sha256")
+            .update(resetToken)
+            .digest("hex");
+
+        // 4️⃣ Save token + expiry in DB
         user.resetPasswordToken = hashedToken;
-        user.resetPasswordExpires = Date.now() + 3600000; // 1 hour from now
+        user.resetPasswordExpires = Date.now() + 60 * 60 * 1000; // 1 hour
         await user.save();
-        // Use 'email' here instead of 'userEmail'
-        let transporter = nodemailer.createTransport({
-            host: 'smtp.zoho.in',
-            port: 465,
-            secure: true,
-            auth: {
-                user: process.env.EMAIL_USER,
-                pass: process.env.EMAIL_PASS,
-            },
-        });
 
-        //change at line 433 link
+        // 5️⃣ Create reset link (FRONTEND URL)
         const resetLink = `https://aviationcetofficial.in/reset-password/${resetToken}`;
-        const mailOptions = {
-            from: process.env.EMAIL_USER,
+
+        // 6️⃣ SEND EMAIL USING BREVO ✅
+        await sendEmail({
             to: user.email,
             subject: "Password Reset Request",
-            text: `Click the link to reset your password: ${resetLink}`,
-        };
+            html: `
+        <div style="font-family: Arial, sans-serif;">
+          <h2>Password Reset</h2>
+          <p>Hello ${user.username || "User"},</p>
+          <p>You requested to reset your password.</p>
+          <p>Click the button below to reset it:</p>
 
-        await transporter.sendMail(mailOptions);
+          <a href="${resetLink}"
+             style="
+               display:inline-block;
+               padding:12px 20px;
+               background:#007bff;
+               color:#ffffff;
+               text-decoration:none;
+               border-radius:5px;
+               margin:10px 0;
+             ">
+             Reset Password
+          </a>
 
-        res.status(200).json({ message: "Password reset email sent successfully." });
+          <p>This link is valid for <strong>1 hour</strong>.</p>
+          <p>If you did not request this, please ignore this email.</p>
+
+          <br/>
+          <p>— Aviation CET Team</p>
+        </div>
+      `,
+        });
+
+        // 7️⃣ Response
+        res.status(200).json({
+            message: "If the email exists, a reset link has been sent."
+        });
+
     } catch (error) {
-        console.error("Error:", error.message);
-        res.status(500).json({ error: "Failed to send reset email." });
+        console.error("Forgot-password error:", error);
+        res.status(500).json({
+            error: "Failed to process password reset request."
+        });
     }
 });
+
+
 // Verify reset password token route (GET)
 app.get('/reset-password/:token', async (req, res) => {
     const { token } = req.params;
@@ -786,3 +813,12 @@ server.on("upgrade", (request, socket, head) => {
     });
 });
 
+
+setInterval(() => {
+    const now = Date.now();
+    for (const email in otpStore) {
+        if (otpStore[email].expiresAt < now) {
+            delete otpStore[email];
+        }
+    }
+}, 5 * 60 * 1000);
