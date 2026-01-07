@@ -1,20 +1,30 @@
-const SibApiV3Sdk = require("sib-api-v3-sdk");
-
-const client = SibApiV3Sdk.ApiClient.instance;
-client.authentications["api-key"].apiKey = process.env.BREVO_API_KEY;
-
-const apiInstance = new SibApiV3Sdk.TransactionalEmailsApi();
+const axios = require("axios");
 
 async function sendEmail({ to, subject, html }) {
-    return await apiInstance.sendTransacEmail({
-        sender: {
-            email: process.env.EMAIL_SENDER,
-            name: "Aviation CET"
+    if (!process.env.BREVO_API_KEY) {
+        throw new Error("BREVO_API_KEY is missing");
+    }
+
+    return axios.post(
+        "https://api.brevo.com/v3/smtp/email",
+        {
+            sender: {
+                email: process.env.EMAIL_SENDER,
+                name: "Aviation CET",
+            },
+            to: [{ email: to }],
+            subject,
+            htmlContent: html,
         },
-        to: [{ email: to }],
-        subject,
-        htmlContent: html,
-    });
+        {
+            headers: {
+                "api-key": process.env.BREVO_API_KEY,   // 🔑 EXPLICIT HEADER
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            timeout: 10000,
+        }
+    );
 }
 
 module.exports = sendEmail;

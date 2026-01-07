@@ -28,6 +28,7 @@ const { CloudinaryStorage } = require("multer-storage-cloudinary");
 const sendEmail = require("./utils/sendEmail");
 
 
+require("dotenv").config();
 
 
 
